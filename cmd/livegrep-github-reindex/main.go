@@ -27,6 +27,7 @@ var (
 	flagGithubKey  = flag.String("github-key", os.Getenv("GITHUB_KEY"), "Github API key")
 	flagRepoDir    = flag.String("dir", "repos", "Directory to store repos")
 	flagBlacklist  = flag.String("blacklist", "", "File containing a list of repositories to blacklist indexing")
+	flagWhitelist  = flag.String("whitelist", "", "File containing a list of repositories to whitelist indexing")
 	flagIndexPath  = dynamicDefault{
 		display: "${dir}/livegrep.idx",
 		fn:      func() string { return path.Join(*flagRepoDir, "livegrep.idx") },
@@ -63,10 +64,19 @@ func main() {
 		log.Fatal("You must specify at least one repo or organization to index")
 	}
 
+	var whitelist map[string]struct{}
+	if *flagWhitelist != "" {
+		var err error
+		whitelist, err = loadFilterlist(*flagWhitelist)
+		if err != nil {
+			log.Fatalf("loading %s: %s", *flagWhitelist, err)
+		}
+	}
+
 	var blacklist map[string]struct{}
 	if *flagBlacklist != "" {
 		var err error
-		blacklist, err = loadBlacklist(*flagBlacklist)
+		blacklist, err = loadFilterlist(*flagBlacklist)
 		if err != nil {
 			log.Fatalf("loading %s: %s", *flagBlacklist, err)
 		}
@@ -104,7 +114,12 @@ func main() {
 		log.Fatalln(err.Error())
 	}
 
-	repos = filterRepos(repos, blacklist, !*flagForks, !*flagArchived)
+	// log.Println("candidate repos: %v", repos)
+
+	repos = filterRepos(repos, whitelist, blacklist, !*flagForks, !*flagArchived)
+	if len(repos) == 0 {
+		log.Fatalf("After filtration step, no repositories remain.")
+	}
 
 	sort.Sort(ReposByName(repos))
 
@@ -153,7 +168,7 @@ func (r ReposByName) Len() int           { return len(r) }
 func (r ReposByName) Swap(i, j int)      { r[i], r[j] = r[j], r[i] }
 func (r ReposByName) Less(i, j int) bool { return *r[i].FullName < *r[j].FullName }
 
-func loadBlacklist(path string) (map[string]struct{}, error) {
+func loadFilterlist(path string) (map[string]struct{}, error) {
 	data, err := ioutil.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -254,7 +269,7 @@ func runJobs(client *github.Client, jobc <-chan loadJob, done <-chan struct{}, o
 }
 
 func filterRepos(repos []*github.Repository,
-	blacklist map[string]struct{},
+	whitelist, blacklist map[string]struct{},
 	excludeForks bool, excludeArchived bool) []*github.Repository {
 	var out []*github.Repository
 
@@ -266,6 +281,11 @@ func filterRepos(repos []*github.Repository,
 		if excludeArchived && r.Archived != nil && *r.Archived {
 			log.Printf("Excluding archived %s...", *r.FullName)
 			continue
+		}
+		if whitelist != nil {
+			if _, ok := whitelist[*r.FullName]; !ok {
+				continue
+			}
 		}
 		if blacklist != nil {
 			if _, ok := blacklist[*r.FullName]; ok {
